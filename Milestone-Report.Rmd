@@ -1,0 +1,376 @@
+---
+title: "Milestone Report for the Capstone Project"
+author: "Florian Ulmar"
+date: "23. April 2016"
+output: html_document
+---
+
+```{r warning = F, message = F, echo = F}
+library(knitr)
+opts_chunk$set(warning = F, message = F, echo = T)
+```
+
+# Introduction
+
+Around the world, people are spending an increasing amount of time on their mobile devices for email, social networking, banking and a whole range of other activities. But typing on mobile devices can be a serious pain. SwiftKey, the corporate partner in this capstone project, builds a smart keyboard that makes it easier for people to type on their mobile devices. One cornerstone of their smart keyboard is predictive text models. When someone types:
+
+"I went to the"
+
+the keyboard presents three options for what the next word might be. For example, the three words might be gym, store, restaurant.
+
+The goal of the Capstone Project is to develope a data product that takes as input a phrase (multiple words), one clicks submit, and it predicts the next word.
+
+In this report we will explore three datasets in English language - en_US.blogs.txt, en_US.twitter.txt, en_US.news.txt. The training data can be downloaded from this link: [Coursera-SwiftKey.zip](
+"https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"). We will give some summary statistics considering frequencies of words and word groups. At least we briefly will summarize our plans for creating the prediction algorithm and Shiny app in an understandable way.
+
+# Getting the Data
+
+We first load the three text files and store them as .RData-file which can be loaded much more faster for the further analysis.
+
+```{r eval = F}
+if(!file.exists("Swiftkey.zip")){
+    url = "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+    download.file(url, "Swiftkey.zip")
+}
+if(!file.exists("./final/en_US/en_US.blogs.txt")){
+    unzip(zipfile = "Swiftkey.zip")
+}
+
+if(!(exists("twitter"))) {
+    con <- file("./final/en_US/en_US.twitter.txt", "rb")
+    twitter <- readLines(con, encoding = "UTF-8", warn = F)
+    close(con)
+}
+if(!(exists("news"))) {
+    con <- file("./final/en_US/en_US.news.txt", "rb")
+    news <- readLines(con, encoding = "UTF-8", warn = F)
+    close(con)
+}
+if(!(exists("blogs"))) {
+    con <- file("./final/en_US/en_US.blogs.txt", "rb")
+    blogs <- readLines(con, encoding = "UTF-8", warn = F)
+    close(con)
+}
+
+if(!file.exists("en_US.RData")) {
+    save(blogs, news, twitter, file = "en_US.RData")
+}
+
+if(exists("twitter")) {remove(twitter)}
+if(exists("news")) {remove(news)}
+if(exists("blogs")) {remove(blogs)}
+
+```
+
+```{r}
+
+load("en_US.RData")
+
+data_print <- data.frame(
+    source = c("en_US.blogs.txt", "en_US.news.txt", "en_US.twitter.txt"),
+    MB = signif(c(file.info("./final/en_US/en_US.blogs.txt")$size,
+                  file.info("./final/en_US/en_US.news.txt")$size,
+                  file.info("./final/en_US/en_US.twitter.txt")$size) / 1024 ^ 2, 6),
+    length = c(length(blogs), length(news), length(twitter)),
+    maxChar = c(max(nchar(blogs)), max(nchar(news)), max(nchar(twitter)))
+)
+```
+
+The size of the original dataset is given by:
+
+```{r echo = F}
+print(data_print)
+```
+
+# Exploratory Analysis of the Data
+
+## Building a Term Document Matrix (TDM)
+
+For the exploratory analysis it is necessary to load the following libraries:
+
+```{r echo = F}
+# Sys.setenv(JAVA_HOME="C:\\Program Files (x86)\\Java\\jre1.8.0_65")
+# library(rJava) # for RWeka
+```
+
+```{r}
+library(dplyr) # mutate, filter, arrange, select,
+library(tm) # VCorpus, tm_map
+library(RWeka) # n-gram-model
+
+library(ggplot2)
+library(RColorBrewer)
+library(wordcloud) # plotting wordcloud
+library(pryr) # %<a-%
+```
+
+For the further investigations we only consider a sample of the datasets.
+
+In a first step we will build a "volatile" corpus of words which means that the corpus is stored in memory. The data will be cleaned by removing whitespaces, punctuation and numbers. We only want to consider words which occur more than one times and we also filter profane words by a badword-list which is taken from [google](https://code.google.com/archive/p/badwordslist/downloads)
+
+From this corpus we extract a TDM which contains the frequencies of the words and word groups.
+
+```{r}
+
+load("en_US.RData")
+
+set.seed(333)
+
+n_sample <- 2000
+
+data <- c(
+    twitter[sample(1:length(twitter), size = n_sample, replace = F)],
+    news[sample(1:length(news), size = n_sample, replace = F)],
+    blogs[sample(1:length(blogs), size = n_sample, replace = F)])
+
+data_text <- paste(data, collapse = " ")
+
+vcorpus <- VCorpus(VectorSource(data_text),
+                   readerControl = list(reader = readPlain,
+                                        language = "english",
+                                        encoding = "ANSI"))
+vcorpus <- tm_map(vcorpus, stripWhitespace)
+vcorpus <- tm_map(vcorpus, removePunctuation)
+vcorpus <- tm_map(vcorpus, content_transformer(tolower))
+vcorpus <- tm_map(vcorpus, content_transformer(removeNumbers))
+# source: https://code.google.com/archive/p/badwordslist/downloads
+vorcpus <- tm_map(vcorpus, removeWords, "./badwords.txt")
+
+ngram1 <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 1))
+ngram2 <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+ngram3 <- function(x) NGramTokenizer(x, Weka_control(min = 3, max = 3))
+
+tdm1 <- TermDocumentMatrix(vcorpus, control = list(tokenize = ngram1))
+tdm2 <- TermDocumentMatrix(vcorpus, control = list(tokenize = ngram2))
+tdm3 <- TermDocumentMatrix(vcorpus, control = list(tokenize = ngram3))
+
+df_ngram <- function(tdm) {
+    df <- as.data.frame(as.matrix(tdm))
+    df <- df %>%
+        mutate(terms = row.names(df),
+               count = rowSums(df)) %>%
+        filter(count > 1) %>%
+        arrange(desc(count)) %>%
+        select(terms:count)
+    df <- df %>% mutate(prob = count / sum(df$count))
+    return(df)
+}
+
+df1 <- df_ngram(tdm1)
+df2 <- df_ngram(tdm2)
+df3 <- df_ngram(tdm3)
+
+```
+
+## Frequencies of Words
+
+In a language some words are more frequent than others. For that feason we want to consider the distribution of the most frequent words of the data set.
+
+```{r}
+barplot_terms <- function(df) {
+    g <- ggplot(data = head(arrange(df, desc(count)), 10),
+                aes(x = reorder(terms, desc(count)), y = count))
+    g <- g + geom_bar(stat = "identity", fill = "darkblue")
+    g <- g + labs(x = "words", y = "frequency",
+                  title = "barplot of word frequencies")
+    g <- g + theme_bw()
+    g <- g + theme(axis.text.x = element_text(angle = 90, size = 10))
+    return(g)
+}
+
+g1 <- barplot_terms(df1)
+```
+
+```{r echo = F}
+print(g1)
+print(head(df1, 10))
+```
+
+Another interesting question will be: How many unique words do you need in a frequency sorted dictionary to cover a percentage of all word instances in the language.
+
+The following plot shows the percentage of coverage as a function of the number of unique words:
+
+```{r}
+
+data_plot <- df1
+data_plot$index <- 1:nrow(data_plot)
+data_plot <- within(data_plot, acc_sum <- cumsum(count))
+data_plot$perc <- data_plot$acc_sum / sum(data_plot$count)
+g <- ggplot(data = data_plot, aes(x = index, y = perc))
+g <- g + geom_line(color = "darkblue", lwd = 1)
+g <- g + geom_hline(yintercept = 0.5, colour = "red4", lwd = 1, lty = 5)
+g <- g + geom_hline(yintercept = 0.9, colour = "red4", lwd = 1, lty = 5)
+g <- g + geom_hline(yintercept = 0.95, colour = "red4", lwd = 1, lty = 5)
+g <- g + labs(x = "number of words", y = "percentage %",
+              title = "cumulative quantiles")
+g <- g + theme_bw()
+
+data_print <- data.frame(
+    "percent" = c(0.5, 0.9, 0.95) * 100,
+    "number" = c(
+        row.names(df1[min(which((cumsum(df1$count) / sum(df1$count)) >= 0.5)),]),
+        row.names(df1[min(which((cumsum(df1$count) / sum(df1$count)) >= 0.9)),]),
+        row.names(df1[min(which((cumsum(df1$count) / sum(df1$count)) >= 0.95)),]))
+)
+
+```
+
+```{r echo = F}
+print(g)
+print(data_print)
+```
+
+## Frequencies of N-Grams
+
+At least we will show the most frequent 2-grams and 3-grams in the dataset:
+
+```{r}
+
+g2 <- barplot_terms(df2)
+g3 <- barplot_terms(df3)
+
+# wordcloud
+w2 %<a-% wordcloud(df2$terms, df2$count, max.words = 30,
+                   colors = rev(brewer.pal(10, "RdYlBu")),
+                   random.order = FALSE,
+                   main = "Title")
+
+w3 %<a-% wordcloud(df3$terms, df3$count, max.words = 30,
+                   colors = rev(brewer.pal(10, "RdYlBu")),
+                   random.order = FALSE,
+                   main = "Title")
+```
+
+```{r echo = F, message = F, warning = F}
+print(g2)
+print(g3)
+par(mfrow = c(1, 2))
+w2
+w3
+par(mfrow = c(1, 1))
+print(head(df2, 10))
+print(head(df3, 10))
+```
+
+# Plans for the Future
+
+## Theory of Natural Language Processing (NLP)
+
+The following considerations refer to the [Coursera course on NLP (not in R)](https://www.coursera.org/course/nlp)
+
+The Chain Rule applied to compute joint probability of words in sentence is given by
+
+$\hspace{1cm}P(w_1 w_2 \dots w_n)= \prod\limits_{i} P(w_i | w_1 w_2 \dots w_{i-1})$
+
+$\hspace{1cm} P(w_i | w_1 w_2 \dots w_{i-1}) = \frac{P(w_1 w_2 \dots w_{i-1} w_i)}{P(w_1 w_2 \dots w_{i-1})}$
+
+In practise there are to many possible word groups in a language. So we make the following simplifying assumption, called Markow assumption:
+
+The probability for the next word can be estimated by the previous word or a couple of previous words and not by the entire context.
+
+$\hspace{1cm} P(w_i | w_1 w_2 \dots w_{i-1}) = P(w_i | w_{i-k} \dots w_{i-1})$
+
+For example the probability for a word estimated by one previsous word is given by:
+
+$\hspace{1cm} P(w_n | w_{n-1})=\frac{\text{count}(w_{n-1}w_n)}{\text{count}(w_{n-1})}$
+
+In general this model may be unsuffient because language also has long-distance dependencies. If we consider i.e. the sentence
+
+"The computer which I had just put into the machine room on the fifth floor crashed"
+
+the word "crashed" refers to the "computer" and is not predictable by the words before.
+
+## Modelling of the Prediction Algorithm
+
+In this project we will build a basic n-gram model for predicting the next word based on the previous 1, 2, or 3 words. The following code chunk shows the alogirithm:
+
+```{r}
+
+#' This function provides a data.frame which contains possible predicted words
+#' ordered by probability. The words are predicted by the previous n-1 words.
+#'
+#' @param input: a character string conaining the input sentence
+#' @param n: number of words of the n-gram with the predicted word
+#' @param df_max: a data.frame containing a n-gram containing the fields
+#' "terms", "count" amd "prob" (as calculated above)
+#' @param df_min: a data.frame containing a (n-1)-gram containing the fields
+#' "terms", "count" amd "prob" (as calculated above)
+#' @return df: a data.frame which contains:
+#' "words": possible predicted words
+#' "count": number of ngrams with the predicted word in the sample
+#' "probability": probability of the predicted word
+#' @author Florian Ulmar
+
+predict_ngram <- function(input, df_min, df_max, n) {
+    
+    # remove everything except literals and spaces
+    input <- gsub("[^a-zA-Z ]", "", input)
+    input <- gsub("\\s+", " ", input) # remove multiple spaces
+    input <- tolower(input)
+    
+    # only the last n - 1 words of the input
+    term <- tail(unlist(strsplit(input, " ")), n - 1)
+    # if number of words is not too small
+    if(length(term) < n - 1) {return()}
+    # looking for n-grams which beginn with term
+    term <- paste("^\\b", paste(term, collapse = " "), "\\b", sep = "")
+    
+    # find = rows of df_max which contain term
+    df_max$terms <- as.character(df_max$terms)
+    df_max <- df_max[grep(term, df_max$terms),]
+    if(nrow(df_max) == 0) {
+        return()
+    }
+    
+    # find = rows of df_min which contain term
+    df_min$terms <- as.character(df_min$terms)
+    df_min <- df_min[grep(term, df_min$terms),]
+    if(nrow(df_min) == 0) {
+        return()
+    }
+    
+    # vector of possible predictors of df_max
+    mat_max <- matrix(unlist(strsplit(df_max$terms, " ")), ncol = n, byrow = T)
+    
+    # data frame with possible words
+    df <- data.frame(
+        "word" = mat_max[, n],
+        "count" = df_max$count,
+        "prob" = df_max$count / max(df_min$count)
+    )
+    
+    df <- df %>%
+        arrange(desc(prob)) %>%
+        mutate(word = as.character(word))
+    
+    return(df)
+}
+
+# Example
+df <- predict_ngram(input = "I went to the", df_min = df2, df_max = df3, n = 3)
+print(head(df, 10))
+
+```
+
+For refining the model it may be important to investigate the following aspects:
+
+* Optimize size of the sample data and runtime of the algorithm
+
+* Removing stop words from the sample
+
+* Stemming words (i.e. "example" and "examples" are both stemmed to "exampl")
+
+* Consider the beginning and the end of sentences
+
+* Reserving probability mass for not seen events
+
+## Building a Data Product
+
+* The goal of this project will be to develope a Shiny app which takes as input a phrase (multiple words). By clicking on a submit button it predicts the next word.
+
+* The app should have the possibility to choose the size of the n-gram for prediction.
+
+* Additionally we want to show some statistical information about the data sample (i.e. frequency of the n-grams)
+
+
+
